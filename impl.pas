@@ -16,17 +16,30 @@ type
 
   CircleView = interface(NSView)
     ['{DD9EF84E-A302-4009-AF48-1F72290E7D32}']
+    // Standard view create/free methods
     function initWithFrame(frame: NSRect): Pointer; cdecl;
-    procedure drawRect(rect: NSRect); cdecl;
+    /// procedure dealloc; cdecl;
 
-    procedure takeColorFrom(sender: Pointer); cdecl;
-    procedure takeRadiusFrom(sender: Pointer); cdecl;
-    procedure takeStartingAngleFrom(sender: Pointer); cdecl;
-    procedure takeAngularVelocityFrom(sender: Pointer); cdecl;
-    procedure takeStringFrom(sender: Pointer); cdecl;
-    procedure startAnimation(sender: Pointer); cdecl;
-    procedure stopAnimation(sender: Pointer); cdecl;
-    procedure toggleAnimation(sender: Pointer); cdecl;
+    // Drawing
+    procedure drawRect(rect: NSRect); cdecl;
+    function isOpaque: Boolean; cdecl;
+
+    // Event handling
+    procedure mouseDown(event: NSEvent); cdecl;
+    procedure mouseDragged(event: NSEvent); cdecl;
+
+    // Custom methods for actions this view implements
+    procedure takeColorFrom(sender: NSColorWell); cdecl;
+    procedure takeRadiusFrom(sender: NSControl); cdecl;
+    procedure takeStartingAngleFrom(sender: NSControl); cdecl;
+    procedure takeAngularVelocityFrom(sender: NSControl); cdecl;
+    procedure takeStringFrom(sender: NSControl); cdecl;
+    procedure startAnimation(sender: NSControl); cdecl;
+    procedure stopAnimation(sender: NSControl); cdecl;
+    procedure toggleAnimation(sender: NSControl); cdecl;
+
+    // Method invoked by timer
+    procedure performAnimation(sender: NSTimer); cdecl;
   end;
 
   TCircleView = class(TOCLocalEx<CircleView, NSView>)
@@ -40,28 +53,51 @@ type
     textContainer: NSTextContainer;
     timer: NSTimer;
     lastTime: NSTimeInterval;
-  public { NSView }
+  private
+    // Methods to set parameters
+    procedure setColor(color: NSColor);
+    procedure setRadius(distance: CGFloat);
+    procedure setStartingAngle(angle: CGFloat);
+    procedure setAngularVelocity(velocity: CGFloat);
+    procedure setString(&string: NSString);
+  public { ObjectiveC }
+    // Standard view create/free methods
     function initWithFrame(frame: NSRect): Pointer; cdecl;
+    destructor Destroy; /// procedure dealloc; cdecl;
+
+    // Drawing
     procedure drawRect(rect: NSRect); cdecl;
-  public { CircleView }
-    procedure takeColorFrom(sender: Pointer); cdecl;
-    procedure takeRadiusFrom(sender: Pointer); cdecl;
-    procedure takeStartingAngleFrom(sender: Pointer); cdecl;
-    procedure takeAngularVelocityFrom(sender: Pointer); cdecl;
-    procedure takeStringFrom(sender: Pointer); cdecl;
-    procedure startAnimation(sender: Pointer); cdecl;
-    procedure stopAnimation(sender: Pointer); cdecl;
-    procedure toggleAnimation(sender: Pointer); cdecl;
+    function isOpaque: Boolean; cdecl;
+
+    // Event handling
+    procedure mouseDown(event: NSEvent); cdecl;
+    procedure mouseDragged(event: NSEvent); cdecl;
+
+    // Custom methods for actions this view implements
+    procedure takeColorFrom(sender: NSColorWell); cdecl;
+    procedure takeRadiusFrom(sender: NSControl); cdecl;
+    procedure takeStartingAngleFrom(sender: NSControl); cdecl;
+    procedure takeAngularVelocityFrom(sender: NSControl); cdecl;
+    procedure takeStringFrom(sender: NSControl); cdecl;
+    procedure startAnimation(sender: NSControl); cdecl;
+    procedure stopAnimation(sender: NSControl); cdecl;
+    procedure toggleAnimation(sender: NSControl); cdecl;
+
+    // Method invoked by timer
+    procedure performAnimation(sender: NSTimer); cdecl;
   end;
 
 implementation
 
+uses Macapi.ObjCRuntime;
+
 const
   AppKitLib = '/System/Library/Frameworks/AppKit.framework/AppKit';
   M_PI_2 = PI / 2;
+  YES = True;
   NO = False;
 
-procedure NSRectFill(const aRect: NSRect); cdecl; external AppKitLib name '_NSRectFill';
+procedure NSRectFill(aRect: NSRect); cdecl; external AppKitLib name '_NSRectFill';
 
 function NSMaxRange(const range: NSRange): NSUInteger; inline;
 begin
@@ -144,6 +180,17 @@ begin
   end;
 end;
 
+destructor TCircleView.Destroy; /// procedure TCircleView.dealloc;
+begin
+  timer.invalidate;
+  timer.release;
+  textStorage.release;
+  inherited Destroy;
+end;
+
+var
+  set_SEL: Pointer;
+
 procedure TCircleView.drawRect(rect: NSRect);
 var
   glyphIndex: NSUInteger;
@@ -158,7 +205,11 @@ var
   distance: CGFloat;
   transform: NSAffineTransform;
 begin
-///TODO:  TNSColor.OCClass.whiteColor;//  [[NSColor whiteColor] set];
+  if set_SEL = nil then
+  begin
+    set_SEL := sel_registerName('set');
+  end;
+  objc_msgSend(TNSColor.OCClass.whiteColor, set_SEL);
   NSRectFill(Super.bounds);
 
   // Note that usedRectForTextContainer: does not force layout, so it must
@@ -202,36 +253,149 @@ begin
   end;
 end;
 
-procedure TCircleView.startAnimation(sender: Pointer);
+function TCircleView.isOpaque: Boolean;
 begin
+  Result := YES;
 end;
 
-procedure TCircleView.stopAnimation(sender: Pointer);
+// DotView changes location on mouse up, but here we choose to do so
+// on mouse down and mouse drags, so the text will follow the mouse.
+
+procedure TCircleView.mouseDown(event: NSEvent);
+var
+  eventLocation: NSPoint;
 begin
+  eventLocation := event.locationInWindow;
+  center := Super.convertPoint(eventLocation, nil);
+  Super.setNeedsDisplay(YES);
 end;
 
-procedure TCircleView.takeAngularVelocityFrom(sender: Pointer);
+procedure TCircleView.mouseDragged(event: NSEvent);
+var
+  eventLocation: NSPoint;
 begin
+  eventLocation := event.locationInWindow;
+  center := Super.convertPoint(eventLocation, nil);
+  Super.setNeedsDisplay(YES);
 end;
 
-procedure TCircleView.takeColorFrom(sender: Pointer);
+// DotView uses action methods to set its parameters.  Here we have
+// factored each of those into a method to set each parameter directly
+// and a separate action method.
+
+procedure TCircleView.setColor(color: NSColor);
 begin
+  // Text drawing uses the attributes set on the text storage rather
+  // than drawing context attributes like the current color.
+  textStorage.addAttribute(NSForegroundColorAttributeName, (color as ILocalObject).GetObjectID, NSMakeRange(0, textStorage.length));
+  Super.setNeedsDisplay(YES);
 end;
 
-procedure TCircleView.takeRadiusFrom(sender: Pointer);
+procedure TCircleView.setRadius(distance: CGFloat);
 begin
+  radius := distance;
+  Super.setNeedsDisplay(YES);
 end;
 
-procedure TCircleView.takeStartingAngleFrom(sender: Pointer);
+procedure TCircleView.setStartingAngle(angle: CGFloat);
 begin
+  startingAngle := angle;
+  Super.setNeedsDisplay(YES);
 end;
 
-procedure TCircleView.takeStringFrom(sender: Pointer);
+procedure TCircleView.setAngularVelocity(velocity: CGFloat);
 begin
+  angularVelocity := velocity;
+  Super.setNeedsDisplay(YES);
 end;
 
-procedure TCircleView.toggleAnimation(sender: Pointer);
+procedure TCircleView.setString(&string: NSString);
 begin
+  textStorage.replaceCharactersInRange(NSMakeRange(0, textStorage.length), &string);
+  Super.setNeedsDisplay(YES);
+end;
+
+procedure TCircleView.takeColorFrom(sender: NSColorWell);
+begin
+  setColor(sender.color);
+end;
+
+procedure TCircleView.takeRadiusFrom(sender: NSControl);
+begin
+  setRadius(sender.doubleValue);
+end;
+
+procedure TCircleView.takeStartingAngleFrom(sender: NSControl);
+begin
+  setStartingAngle(sender.doubleValue);
+end;
+
+procedure TCircleView.takeAngularVelocityFrom(sender: NSControl);
+begin
+  setAngularVelocity(sender.doubleValue);
+end;
+
+procedure TCircleView.takeStringFrom(sender: NSControl);
+begin
+  setString(sender.stringValue);
+end;
+
+var
+  performAnimation_SEL: Pointer;
+
+procedure TCircleView.startAnimation(sender: NSControl);
+begin
+  stopAnimation(sender);
+
+  // We schedule a timer for a desired 30fps animation rate.
+  // In performAnimation: we determine exactly
+  // how much time has elapsed and animate accordingly.
+  if performAnimation_SEL = nil then
+  begin
+    performAnimation_SEL := sel_registerName('performAnimation:');
+  end;
+  timer := TNSTimer.Wrap(TNSTimer.OCClass.scheduledTimerWithTimeInterval(1.0/30.0, GetObjectID, performAnimation_SEL, nil, Yes));
+  timer.retain;
+
+  // The next two lines make sure that animation will continue to occur
+  // while modal panels are displayed and while event tracking is taking
+  // place (for example, while a slider is being dragged).
+  TNSRunLoop.Wrap(TNSRunLoop.OCClass.currentRunLoop).addTimer(timer, NSModalPanelRunLoopMode);
+  TNSRunLoop.Wrap(TNSRunLoop.OCClass.currentRunLoop).addTimer(timer, NSEventTrackingRunLoopMode);
+
+  lastTime := TNSDate.OCClass.timeIntervalSinceReferenceDate;
+end;
+
+procedure TCircleView.stopAnimation(sender: NSControl);
+begin
+  if timer <> nil then
+  begin
+    timer.invalidate;
+    timer.release;
+    timer := nil;
+  end;
+end;
+
+procedure TCircleView.toggleAnimation(sender: NSControl);
+begin
+  if timer <> nil then
+  begin
+    stopAnimation(sender);
+  end else
+  begin
+    startAnimation(sender);
+  end;
+end;
+
+procedure TCircleView.performAnimation(sender: NSTimer);
+var
+  thisTime: NSTimeInterval;
+begin
+  // We determine how much time has elapsed since the last animation,
+  // and we advance the angle accordingly.
+  thisTime := TNSDate.OCClass.timeIntervalSinceReferenceDate;
+  setStartingAngle(startingAngle + angularVelocity * (thisTime - lastTime));
+  lastTime := thisTime;
 end;
 
 end.
