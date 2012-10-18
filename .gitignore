@@ -1,0 +1,5 @@
+/bin
+/dcu
+/*.res
+/*.identcache
+/*.dproj.local
